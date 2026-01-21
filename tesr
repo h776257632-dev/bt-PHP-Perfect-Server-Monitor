@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>全维度硬件深度调试</title>
+    <style>
+        body { font-family: "Courier New", monospace; background: #000; color: #0f0; padding: 20px; font-size: 13px; }
+        h2 { border-top: 1px dashed #0f0; padding-top: 10px; margin-top: 30px; color: #fff; }
+        .cmd { color: #ff0; font-weight: bold; margin-bottom: 5px; }
+        pre { margin: 0; white-space: pre-wrap; word-wrap: break-word; }
+        .empty { color: #666; font-style: italic; }
+    </style>
+</head>
+<body>
+<h1>☢️ 全维度硬件深度调试报告</h1>
+<p>此脚本将执行地毯式搜索，不放过任何一个硬件参数。</p>
+
+<?php
+// 核心执行函数
+function run($title, $cmd) {
+    echo "<h2>$title</h2>";
+    echo "<div class='cmd'># $cmd</div>";
+    
+    // 计时
+    $start = microtime(true);
+    // 2>&1 确保错误信息也能看到
+    $output = shell_exec($cmd . " 2>&1");
+    $end = microtime(true);
+    
+    if (empty(trim($output))) {
+        echo "<div class='empty'>[无输出 / 空]</div>";
+    } else {
+        echo "<pre>" . htmlspecialchars($output) . "</pre>";
+    }
+}
+
+// ===========================================
+// 1. 基础环境与权限 (排查是否因为权限导致读不到)
+// ===========================================
+run("1.1 身份与权限", "whoami && id && groups");
+run("1.2 环境变量", "echo \$PATH");
+
+// ===========================================
+// 2. 传感器深度扫描 (这是你最关心的温度)
+// ===========================================
+run("2.1 标准传感器 (lm-sensors)", "sensors");
+run("2.2 原始热区列表 (Thermal Zones)", "ls -1 /sys/class/thermal/thermal_zone*");
+
+// 循环读取每一个热区的类型和温度
+echo "<h3>2.3 热区详细数据 (映射表)</h3><pre>";
+$zones = glob('/sys/class/thermal/thermal_zone*');
+if($zones) {
+    foreach($zones as $zone) {
+        $type = trim(shell_exec("cat $zone/type 2>/dev/null"));
+        $temp = trim(shell_exec("cat $zone/temp 2>/dev/null"));
+        echo basename($zone) . " => Type: [" . str_pad($type, 15) . "] Temp: " . ($temp/1000) . "°C\n";
+    }
+} else {
+    echo "未发现 /sys/class/thermal/thermal_zone* 文件";
+}
+echo "</pre>";
+
+run("2.4 硬件监控目录 (Hwmon)", "ls -l /sys/class/hwmon/");
+// 深度遍历 hwmon 目录
+echo "<h3>2.5 Hwmon 深度遍历</h3><pre>";
+$hwmons = glob('/sys/class/hwmon/hwmon*');
+if($hwmons) {
+    foreach($hwmons as $hw) {
+        $name = trim(shell_exec("cat $hw/name 2>/dev/null"));
+        echo "\n--- " . basename($hw) . " (" . $name . ") ---\n";
+        // 读取该目录下所有 temp*_input 文件
+        $inputs = glob("$hw/temp*_input");
+        if($inputs) {
+            foreach($inputs as $input) {
+                $val = trim(shell_exec("cat $input 2>/dev/null"));
+                $label_file = str_replace("_input", "_label", $input);
+                $label = file_exists($label_file) ? trim(shell_exec("cat $label_file")) : basename($input);
+                echo "$label : " . ($val/1000) . "°C\n";
+            }
+        } else {
+            echo "(无温度传感器文件)\n";
+        }
+    }
+}
+echo "</pre>";
+
+// ===========================================
+// 3. 硬盘深度信息 (解决 smartctl 权限问题)
+// ===========================================
+run("3.1 块设备详情 (lsblk 包含物理型号)", "lsblk -o NAME,SIZE,TYPE,FSTYPE,MODEL,SERIAL");
+run("3.2 挂载点详情 (df -hT)", "df -hT");
+run("3.3 尝试读取 SMART (sda)", "smartctl -a /dev/sda | grep -E 'Device Model|Serial Number|Temperature|Health'");
+run("3.4 尝试读取 SMART (nvme0n1)", "smartctl -a /dev/nvme0n1 | grep -E 'Model Number|Serial Number|Temperature|Critical Warning'");
+// 尝试用 hddtemp (如果有)
+run("3.5 硬盘温度 (hddtemp)", "hddtemp /dev/sda /dev/nvme0n1");
+
+// ===========================================
+// 4. CPU 核心级详情
+// ===========================================
+run("4.1 CPU 核心物理识别", "cat /proc/cpuinfo | grep -E 'processor|physical id|core id|cpu cores|model name' | head -n 20");
+run("4.2 CPU 实时频率 (所有核心)", "cat /proc/cpuinfo | grep 'MHz'");
+run("4.3 CPU 实时状态统计", "cat /proc/stat | head -n 10");
+
+// ===========================================
+// 5. 内存与交换分区
+// ===========================================
+run("5.1 内存总量与交换 (free -h)", "free -h");
+run("5.2 内存详细参数 (meminfo)", "cat /proc/meminfo | grep -E 'Mem|Swap|Cached|Buffers|Slab'");
+
+// ===========================================
+// 6. 网络接口
+// ===========================================
+run("6.1 网络接口列表", "ip addr show");
+run("6.2 网卡物理状态 (eth0)", "ethtool eth0"); // 如果没装ethtool可能会报错，没关系
+run("6.3 实时流量计数器", "cat /proc/net/dev");
+
+?>
+</body>
+</html>
